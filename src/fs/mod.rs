@@ -2,9 +2,9 @@
 
 use chrono::prelude::*;
 use std::error::Error;
-use std::io::Read;
 use std::path::Path;
 use std::time::SystemTime;
+use rocket::tokio::io::AsyncRead;
 
 mod embedded;
 mod local;
@@ -33,7 +33,7 @@ impl<'a> From<&'a Entry> for TemplateEntry {
             Entry::File(name, size, last_modified) => {
                 let last_modified: DateTime<Utc> = DateTime::from(*last_modified);
                 let last_modified = last_modified
-                    .format(::LAST_MODIFIED_DATE_FORMAT)
+                    .format(crate::LAST_MODIFIED_DATE_FORMAT)
                     .to_string();
                 TemplateEntry {
                     name: name.to_string(),
@@ -53,17 +53,26 @@ impl<'a> From<&'a Entry> for TemplateEntry {
 }
 
 /// Implement this trait to provide a filesystem to serve from.
+#[rocket::async_trait]
 pub trait FileSystem {
-    type Read: Read;
-    fn is_file<P: AsRef<Path>>(&self, path: P) -> bool;
-    fn is_dir<P: AsRef<Path>>(&self, path: P) -> bool;
-    fn last_modified<P: AsRef<Path>>(&self, path: P) -> Result<SystemTime, Box<Error>>;
-    fn size<P: AsRef<Path>>(&self, path: P) -> Result<u64, Box<Error>>;
-    fn open<P: AsRef<Path>>(
+    type Read: AsyncRead + Send + Unpin;
+
+    async fn is_file<P>(&self, path: P) -> bool
+        where P: AsRef<Path> + Send;
+    async fn is_dir<P>(&self, path: P) -> bool
+        where P: AsRef<Path> + Send;
+    async fn last_modified<P>(&self, path: P) -> Result<SystemTime, Box<dyn Error>>
+        where P: AsRef<Path> + Send;
+    async fn size<P>(&self, path: P) -> Result<u64, Box<dyn Error>>
+        where P: AsRef<Path> + Send;
+    async fn open<P>(
         &self,
         path: P,
         start: Option<u64>,
-    ) -> Result<<Self as FileSystem>::Read, Box<Error>>;
-    fn path_valid<P: AsRef<Path>>(&self, path: P) -> bool;
-    fn entries<P: AsRef<Path>>(&self, path: P) -> Result<Vec<Entry>, Box<Error>>;
+    ) -> Result<<Self as FileSystem>::Read, Box<dyn Error>>
+        where P: AsRef<Path> + Send;
+    async fn path_valid<P>(&self, path: P) -> bool
+        where P: AsRef<Path> + Send;
+    async fn entries<P>(&self, path: P) -> Result<Vec<Entry>, Box<dyn Error>>
+        where P: AsRef<Path> + Send;
 }

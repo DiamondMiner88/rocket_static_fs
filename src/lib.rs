@@ -9,6 +9,7 @@
 //! #![feature(plugin)]
 //! #![plugin(rocket_codegen)]
 //!
+//! #[macro_use]
 //! extern crate rocket;
 //! extern crate rocket_static_fs;
 //!
@@ -20,7 +21,7 @@
 //! }
 //!
 //! fn main() {
-//!     let fs = fs::LocalFileSystem::new("src");
+//! let fs = fs::LocalFileSystem::new("src");
 //!     let options = OptionsBuilder::new().prefix("/src").into();
 //!     rocket::ignite()
 //!         .attach(StaticFileServer::new(fs, options).unwrap())
@@ -54,7 +55,6 @@ use chrono::prelude::*;
 use flate2::{read::DeflateEncoder, read::GzEncoder, Compression};
 use fs::{FileSystem, TemplateEntry};
 use handlebars::Handlebars;
-use mime_guess::get_mime_type;
 use regex::Regex;
 use rocket::fairing::{Fairing, Info, Kind};
 use rocket::http::Header;
@@ -64,9 +64,9 @@ use rocket::{Request, Response};
 use std::error::Error as StdError;
 use std::fmt;
 use std::io::Cursor;
-use std::io::Read;
 use std::path::Path;
 use std::str::FromStr;
+use tokio::io::AsyncReadExt;
 
 lazy_static! {
     static ref RANGE_HEADER_REGEX: Regex = Regex::new(r#"(.*?)=(\d+)-(\d+)"#).unwrap();
@@ -110,7 +110,7 @@ impl fmt::Display for Error {
 ///
 /// Implements FromStr for convenience.
 struct Range {
-    typ: String,
+    unit: String,
     start: u64,
     end: Option<u64>,
 }
@@ -125,7 +125,7 @@ impl Range {
 }
 
 impl FromStr for Range {
-    type Err = Box<StdError>;
+    type Err = Box<dyn StdError + Send + Sync + 'static>;
 
     fn from_str(s: &str) -> Result<Self, <Self as FromStr>::Err> {
         match RANGE_HEADER_REGEX.captures(s) {
@@ -135,7 +135,7 @@ impl FromStr for Range {
                 let end: u64 = matches[3].parse()?;
 
                 Ok(Range {
-                    typ: typ.to_string(),
+                    unit: typ.to_string(),
                     start,
                     end: Some(end),
                 })
@@ -146,7 +146,7 @@ impl FromStr for Range {
                     let start: u64 = matches[2].parse()?;
 
                     Ok(Range {
-                        typ: typ.to_string(),
+                        unit: typ.to_string(),
                         start,
                         end: None,
                     })
@@ -176,11 +176,11 @@ where
     /// `prefix` is the prefix the serve from.
     ///
     /// You can set a prefix of /assets and only requests to /assets/* will be served.
-    pub fn new(fs: T, options: Options) -> Result<Self, Box<StdError>> {
+    pub fn new(fs: T, options: Options) -> Result<Self, Box<dyn StdError>> {
         Ok(StaticFileServer { fs, options })
     }
 
-    fn handle_directory_listing(&self, req_path: &str, response: &mut Response) {
+    async fn handle_directory_listing<'r>(&self, req_path: &str, response: &mut Response<'r>) {
         if !req_path.ends_with('/') && req_path != "" {
             let mut redirect_path = String::new();
             redirect_path.push('/');
@@ -191,7 +191,7 @@ where
             return;
         }
 
-        match self.fs.entries(&req_path) {
+        match self.fs.entries(&req_path).await {
             Ok(entries) => {
                 let mut hbs = Handlebars::new();
                 hbs.register_template_string(
@@ -200,19 +200,19 @@ where
                 ).unwrap();
                 let entries: Vec<TemplateEntry> =
                     entries.iter().map(|e| TemplateEntry::from(e)).collect();
-                let mut context = DirectoryListingContext {
+                let context = DirectoryListingContext {
                     directory: req_path.to_string(),
                     entries,
                 };
                 match hbs.render("directory_listing", &context) {
                     Ok(s) => {
                         response.set_status(Status::Ok);
-                        response.set_sized_body(Cursor::new(s));
+                        response.set_sized_body(s.len(), Cursor::new(s));
                     }
                     Err(e) => {
                         response.set_status(Status::InternalServerError);
                         #[cfg(debug_assertions)]
-                        response.set_sized_body(Cursor::new(e.description().to_string()));
+                        response.set_sized_body(e.desc.len(), Cursor::new(e.desc));
                     }
                 }
             }
@@ -223,6 +223,7 @@ where
     }
 }
 
+#[rocket::async_trait]
 impl<T: 'static> Fairing for StaticFileServer<T>
 where
     T: FileSystem + Sized + Send + Sync,
@@ -234,14 +235,14 @@ where
         }
     }
 
-    fn on_response(&self, request: &Request, response: &mut Response) {
+    async fn on_response<'r>(&self, request: &'r Request<'_>, response: &mut Response<'r>) {
         // Only handle requests which aren't otherwise handled.
         if response.status() != Status::NotFound {
             return;
         }
 
         // Only handle requests which include our prefix
-        let uri = request.uri().as_str();
+        let uri = request.uri().to_string();
         if !((request.method() == Method::Get || request.method() == Method::Head)
             && uri.starts_with(&self.options.prefix()))
         {
@@ -252,16 +253,16 @@ where
         let req_path = uri.replacen(&self.options.prefix(), "", 1);
 
         // Fail on paths outside of the given path
-        if !self.fs.path_valid(&req_path) {
+        if !self.fs.path_valid(&req_path).await {
             response.set_status(Status::Forbidden);
             return;
         }
 
         // If it is no file, we check if it's a directory, if it is, we list the
         // directory contents if enabled in the options. Otherwise we return a not found.
-        if !self.fs.is_file(&req_path) {
-            if self.fs.is_dir(&req_path) && self.options.allow_directory_listing() {
-                self.handle_directory_listing(&req_path, response);
+        if !self.fs.is_file(&req_path).await {
+            if self.fs.is_dir(&req_path).await && self.options.allow_directory_listing() {
+                self.handle_directory_listing(&req_path, response).await;
             } else {
                 response.set_status(Status::NotFound);
             }
@@ -270,13 +271,12 @@ where
 
         // Let's set the mime type here, this can't possibly go wrong anymore *cough*.
         {
-            let file_extension = Path::new(&req_path).extension().unwrap().to_str().unwrap();
-            let mime = get_mime_type(file_extension).to_string();
-            response.set_header(Header::new("Content-Type", mime));
+            let mime = mime_guess::from_path(Path::new(&req_path)).first_or_octet_stream();
+            response.set_header(Header::new("Content-Type", mime.to_string()));
         };
 
         // Get the file modification date and the If-Modified-Since header value
-        let modified = self.fs.last_modified(&req_path).expect("no modified since");
+        let modified = self.fs.last_modified(&req_path).await.expect("no modified since");
         let modified: DateTime<Utc> = DateTime::from(modified);
         let if_modified_since = request.headers().get("If-Modified-Since").next();
 
@@ -294,7 +294,7 @@ where
             };
         }
 
-        let size = match self.fs.size(&req_path) {
+        let size = match self.fs.size(&req_path).await {
             Ok(s) => s,
             Err(_) => {
                 response.set_status(Status::Forbidden);
@@ -317,7 +317,7 @@ where
         // If we get a multipart range request, we more or less fail gracefully here for the moment.
         // We simply set the range here to an error and send the complete file cause of that.
         // TODO: Support multipart ranges
-        let range: Result<Range, Box<StdError>> = if range_header.contains(',') {
+        let range: Result<Range, Box<dyn StdError + Send + Sync + 'static>> = if range_header.contains(',') {
             Err(Box::new(Error::new("multipart ranges not supported")))
         } else {
             range_header.parse::<Range>()
@@ -331,7 +331,7 @@ where
 
         // Otherwise we try to send the file, which should work since that size above should have
         // worked as well.
-        match self.fs.open(&req_path, Some(start)) {
+        match self.fs.open(&req_path, Some(0)).await {
             Ok(f) => {
                 response.set_status(Status::Ok);
                 response.set_header(Header::new("Accept-Ranges", "bytes"));
@@ -341,14 +341,14 @@ where
                 ));
 
                 // We shadow and box our f here to support different Read implementations
-                let mut f: Box<Read> = Box::new(f);
+                let mut f: Box<<T as FileSystem>::Read> = Box::new(f);
 
                 // If we got a range header, we set the corresponding headers here and
                 // set f to a limit reader so it will stop when it reached the range len.
                 if let Ok(ref range) = range {
                     let mut content_length = size - start + 1;
                     if let Some(len) = range.len() {
-                        f = Box::new(f.take(len));
+                        f = f.take(len).into_inner();
                         content_length = len;
                     }
                     response
@@ -356,7 +356,7 @@ where
                     let range_end = start + content_length;
                     response.set_header(Header::new(
                         "Content-Range",
-                        format!("{}={}-{}/{}", range.typ, range.start, range_end, size),
+                        format!("{}={}-{}/{}", range.unit, range.start, range_end, size),
                     ));
                     response.set_status(Status::PartialContent);
                 }
@@ -396,7 +396,7 @@ mod tests {
     use super::*;
     use rocket;
     use rocket::http::{Header, Status};
-    use rocket::local::Client;
+    use rocket::local::blocking::Client;
 
     #[test]
     fn test_with_local_filesystem() {
@@ -518,6 +518,6 @@ mod tests {
             .expect("unable to parse Range header");
         assert_eq!(range.start, 0);
         assert_eq!(range.end, Some(1023));
-        assert_eq!(range.typ, "bytes");
+        assert_eq!(range.unit, "bytes");
     }
 }

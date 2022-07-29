@@ -54,44 +54,55 @@ pub struct EmbeddedFileSystem {
 }
 
 impl EmbeddedFileSystem {
-    pub fn from_bytes(bytes: &'static [u8]) -> Result<Self, Box<Error>> {
+    pub fn from_bytes(bytes: &'static [u8]) -> Result<Self, Box<dyn Error>> {
         let package = Package::from_bytes(bytes)?;
         Ok(EmbeddedFileSystem { package })
     }
 }
 
+#[rocket::async_trait]
 impl FileSystem for EmbeddedFileSystem {
     type Read = Cursor<&'static [u8]>;
 
-    fn is_file<P: AsRef<Path>>(&self, path: P) -> bool {
+    async fn is_file<P>(&self, path: P) -> bool
+        where P: AsRef<Path> + Send
+    {
         self.package
             .files
             .contains_key(path.as_ref().to_str().unwrap())
     }
 
-    fn is_dir<P: AsRef<Path>>(&self, path: P) -> bool {
+    async fn is_dir<P>(&self, path: P) -> bool
+        where P: AsRef<Path> + Send
+    {
         self.package.is_dir(path)
     }
 
-    fn last_modified<P: AsRef<Path>>(&self, path: P) -> Result<SystemTime, Box<Error>> {
+    async fn last_modified<P>(&self, path: P) -> Result<SystemTime, Box<dyn Error>>
+        where P: AsRef<Path> + Send
+    {
         match self.package.files.get(path.as_ref().to_str().unwrap()) {
             Some(file) => Ok(file.last_modified.into()),
-            None => Err(Box::new(::Error::new("file does not exist"))),
+            None => Err(Box::new(crate::Error::new("file does not exist"))),
         }
     }
 
-    fn size<P: AsRef<Path>>(&self, path: P) -> Result<u64, Box<Error>> {
+    async fn size<P>(&self, path: P) -> Result<u64, Box<dyn Error>>
+        where P: AsRef<Path> + Send
+    {
         match self.package.files.get(path.as_ref().to_str().unwrap()) {
             Some(file) => Ok(file.len),
-            None => Err(Box::new(::Error::new("file does not exist"))),
+            None => Err(Box::new(crate::Error::new("file does not exist"))),
         }
     }
 
-    fn open<P: AsRef<Path>>(
+    async fn open<P>(
         &self,
         path: P,
         start: Option<u64>,
-    ) -> Result<<Self as FileSystem>::Read, Box<Error>> {
+    ) -> Result<<Self as FileSystem>::Read, Box<dyn Error>>
+        where P: AsRef<Path> + Send
+    {
         let mut reader = self.package.open(path)?;
         if let Some(start) = start {
             reader.seek(SeekFrom::Start(start))?;
@@ -99,13 +110,17 @@ impl FileSystem for EmbeddedFileSystem {
         Ok(reader)
     }
 
-    fn path_valid<P: AsRef<Path>>(&self, path: P) -> bool {
+    async fn path_valid<P>(&self, path: P) -> bool
+        where P: AsRef<Path> + Send
+    {
         self.package
             .files
             .contains_key(path.as_ref().to_str().unwrap())
     }
 
-    fn entries<P: AsRef<Path>>(&self, path: P) -> Result<Vec<Entry>, Box<Error>> {
+    async fn entries<P>(&self, path: P) -> Result<Vec<Entry>, Box<dyn Error>>
+        where P: AsRef<Path> + Send
+    {
         self.package.entries(path)
     }
 }
@@ -122,7 +137,7 @@ struct InternalFile {
 }
 
 impl Package {
-    pub fn from_bytes(bytes: &'static [u8]) -> Result<Self, Box<Error>> {
+    pub fn from_bytes(bytes: &'static [u8]) -> Result<Self, Box<dyn Error>> {
         let mut cursor = Cursor::new(bytes);
         let meta_len = cursor.read_u64::<BigEndian>()?;
 
@@ -162,7 +177,7 @@ impl Package {
         Ok(Package { files, data })
     }
 
-    fn open<P>(&self, path: P) -> Result<Cursor<&'static [u8]>, Box<Error>>
+    fn open<P>(&self, path: P) -> Result<Cursor<&'static [u8]>, Box<dyn Error>>
     where
         P: AsRef<Path>,
     {
@@ -173,7 +188,7 @@ impl Package {
                 let slice = &self.data[start..end];
                 Ok(Cursor::new(slice))
             }
-            None => Err(Box::new(::Error::new("file does not exist"))),
+            None => Err(Box::new(crate::Error::new("file does not exist"))),
         }
     }
 
@@ -207,7 +222,7 @@ impl Package {
         false
     }
 
-    fn entries<P: AsRef<Path>>(&self, path: P) -> Result<Vec<Entry>, Box<Error>> {
+    fn entries<P: AsRef<Path>>(&self, path: P) -> Result<Vec<Entry>, Box<dyn Error>> {
         let mut path_str = path.as_ref().to_str().unwrap().to_string();
 
         // The path most likely starts with a / but our package paths do not
@@ -255,7 +270,7 @@ impl Package {
 /// The path to read the files will be joined starting at the `root` path.
 ///
 /// Most likely you want to use `create_package_from_dir` instead.
-pub fn write_package<W, T, P>(root: P, input_files: &[T], writer: &mut W) -> Result<(), Box<Error>>
+pub fn write_package<W, T, P>(root: P, input_files: &[T], writer: &mut W) -> Result<(), Box<dyn Error>>
 where
     P: AsRef<Path>,
     W: Write + WriteBytesExt,
@@ -322,7 +337,7 @@ where
 ///     create_package_from_dir("assets", &mut f).unwrap();
 /// }
 /// ```
-pub fn create_package_from_dir<P, W>(dir: P, writer: &mut W) -> Result<(), Box<Error>>
+pub fn create_package_from_dir<P, W>(dir: P, writer: &mut W) -> Result<(), Box<dyn Error>>
 where
     P: AsRef<Path>,
     W: Write,
@@ -339,8 +354,8 @@ where
                 .replacen(root.to_str().unwrap(), "", 1);
 
             files.push(
-                path.trim_left_matches('/')
-                    .trim_left_matches('\\')
+                path.trim_start_matches('/')
+                    .trim_start_matches('\\')
                     .to_string(),
             )
         }
