@@ -1,10 +1,13 @@
 # rocket_static_fs
 
-[![Build Status](https://travis-ci.org/Ekranos/rocket_static_fs.svg?branch=master)](https://travis-ci.org/Ekranos/rocket_static_fs)
-
 A simple static file server for Rust's rocket framework.
 
-[Documentation](https://ekranos.github.io/rocket_static_fs/rocket_static_fs/)
+**NOTE**: This is a fork and continuation of the original [rocket_static_fs](https://crates.io/crates/rocket_static_fs) crate.
+
+## Installation
+```toml
+rocket_static_fs = { git = "https://github.com/DiamondMiner88/rocket_static_fs.git" }
+```
 
 ## Features
 
