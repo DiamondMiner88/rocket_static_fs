@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Directory /{{ directory }}</title>
+
+    <style type="text/css">
+        .name {
+            min-width: 200px;
+        }
+
+        .size {
+            min-width: 100px;
+        }
+
+        .last_modified {
+            min-width: 200px;
+        }
+
+        table th {
+            text-align: left;
+        }
+    </style>
+</head>
+<body>
+<h1>Directory contents of /{{ directory }}</h1>
+<hr/>
+
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Size</th>
+            <th>Last Modified</th>
+        </tr>
+    </thead>
+    <tbody>
+    {{#each entries}}
+        <tr>
+            {{#if is_file }}
+                <td class="name"><a href="{{ name }}">{{ name }}</a></td>
+                <td class="size">{{ size }}</td>
+                <td class="last_modified">{{ last_modified }}</td>
+            {{ else }}
+                <td class="name"><a href="{{ name }}/">{{ name }}/</a></td>
+                <td class="size"></td>
+                <td class="last_modified"></td>
+            {{/if}}
+
+        </tr>
+    {{/each}}
+    </tbody>
+</table>
+
+</body>
+</html>
